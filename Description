@@ -1,0 +1,28 @@
+# 🧭 RBAC & ABAC Automation Lab
+
+A hands-on project that compares **Role-Based Access Control (RBAC)** and **Attribute-Based Access Control (ABAC)** by implementing both models in Python.  
+This lab demonstrates how enterprise IAM teams can automate policy enforcement and evaluate when to evolve from RBAC → ABAC.
+
+---
+
+## 📌 Features
+- **RBAC**
+  - Define roles (Admin, Manager, Analyst, Intern).
+  - Assign permissions by role.
+  - CLI demo to check access decisions.
+
+- **ABAC**
+  - Define attribute-driven policies (e.g., `department=Finance` AND `clearance=High`).
+  - Policy evaluation engine reads from `abac_policies.yaml`.
+  - Compare outcomes vs. RBAC.
+
+- **Hybrid Scenarios**
+  - Show how RBAC + ABAC can be combined for fine-grained decisions (PBAC).
+  - Example: *Finance Manager with high clearance can approve expenses over $10,000.*
+
+---
+
+## 🛠️ Tech Stack
+- Python 3.11+
+- YAML for policy storage
+- Pytest for tests
