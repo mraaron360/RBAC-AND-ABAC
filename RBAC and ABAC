@@ -1,0 +1,1015 @@
+# 🔐 IAM Lab: Role-Based Access Control (RBAC) vs Attribute-Based Access Control (ABAC)
+
+> **Author:** IAM Lab Series  
+> **Level:** Intermediate  
+> **Est. Time:** 90–120 minutes  
+> **Prerequisites:** Basic familiarity with Active Directory, Azure Entra ID, or a Linux system
+
+-----
+
+## 📋 Table of Contents
+
+1. [Overview](#overview)
+1. [Lab Environment Setup](#lab-environment-setup)
+1. [Part 1 — RBAC Lab](#part-1--rbac-lab)
+- [1.1 RBAC in Active Directory](#11-rbac-in-active-directory)
+- [1.2 RBAC in Azure Entra ID](#12-rbac-in-azure-entra-id)
+- [1.3 RBAC with Python Simulation](#13-rbac-with-python-simulation)
+1. [Part 2 — ABAC Lab](#part-2--abac-lab)
+- [2.1 ABAC Concepts and Policy Design](#21-abac-concepts-and-policy-design)
+- [2.2 ABAC with Python Simulation](#22-abac-with-python-simulation)
+- [2.3 ABAC with AWS IAM (Optional)](#23-abac-with-aws-iam-optional)
+1. [Part 3 — RBAC vs ABAC Comparison](#part-3--rbac-vs-abac-comparison)
+1. [Lab Challenges](#lab-challenges)
+1. [Key Takeaways](#key-takeaways)
+1. [References](#references)
+
+-----
+
+## Overview
+
+This lab explores two of the most widely deployed access control models in enterprise IAM:
+
+|Model   |Full Name                     |Core Idea                                                                       |
+|--------|------------------------------|--------------------------------------------------------------------------------|
+|**RBAC**|Role-Based Access Control     |Access is granted based on a user’s **role** in the organization                |
+|**ABAC**|Attribute-Based Access Control|Access is granted based on **attributes** of the user, resource, and environment|
+
+### How Access Decisions Are Made
+
+```
+RBAC Decision Flow:
+  User → assigned Role → Role has Permissions → Access Granted/Denied
+
+ABAC Decision Flow:
+  User Attributes + Resource Attributes + Environment Attributes → Policy Engine → Access Granted/Denied
+```
+
+-----
+
+## Lab Environment Setup
+
+### Option A — Local Python (Recommended for all users)
+
+```bash
+# Clone the lab repo
+git clone https://github.com/YOUR_USERNAME/rbac-abac-lab.git
+cd rbac-abac-lab
+
+# Create a virtual environment
+python3 -m venv venv
+source venv/bin/activate        # Linux/macOS
+# .\venv\Scripts\Activate.ps1  # Windows PowerShell
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+**`requirements.txt`**
+
+```
+py_abac==0.3.0
+tabulate==0.9.0
+```
+
+### Option B — Azure Cloud Shell
+
+1. Sign in to [portal.azure.com](https://portal.azure.com)
+1. Click the **Cloud Shell** icon `>_` in the top navigation bar
+1. Select **Bash**
+
+![Azure Cloud Shell Launch](screenshots/01-azure-cloudshell.png)
+
+> *Screenshot: Azure Cloud Shell opened in Bash mode*
+
+### Option C — Windows PowerShell (for AD sections)
+
+Run PowerShell as Administrator. The AD sections require either a domain-joined machine or the **RSAT tools** installed.
+
+```powershell
+# Verify RSAT is installed
+Get-WindowsCapability -Name RSAT* -Online | Select-Object Name, State
+```
+
+![RSAT Check PowerShell](screenshots/02-rsat-check.png)
+
+> *Screenshot: PowerShell output confirming RSAT AD tools are installed*
+
+-----
+
+## Part 1 — RBAC Lab
+
+### Core RBAC Model
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                      RBAC MODEL                         │
+│                                                         │
+│   Users        Roles            Permissions             │
+│  ┌─────┐     ┌──────────┐     ┌──────────────────┐     │
+│  │Alice├────►│ Nurse    ├────►│ Read Patient Data│     │
+│  └─────┘     └──────────┘     └──────────────────┘     │
+│                                ┌──────────────────┐     │
+│  ┌─────┐     ┌──────────┐     │ Update Orders    │     │
+│  │ Bob ├────►│ Physician├────►│ Prescribe Meds   │     │
+│  └─────┘     └──────────┘     └──────────────────┘     │
+│                                                         │
+│  ┌─────┐     ┌──────────┐     ┌──────────────────┐     │
+│  │Carol├────►│  Admin   ├────►│ Manage Users     │     │
+│  └─────┘     └──────────┘     │ Audit Logs       │     │
+│                                └──────────────────┘     │
+└─────────────────────────────────────────────────────────┘
+```
+
+-----
+
+### 1.1 RBAC in Active Directory
+
+#### Step 1 — Create Security Groups (Roles)
+
+Open **Active Directory Users and Computers (ADUC)** or use PowerShell:
+
+```powershell
+# Import the AD module
+Import-Module ActiveDirectory
+
+# Create an OU to organize the lab
+New-ADOrganizationalUnit -Name "IAM-Lab" -Path "DC=corp,DC=local"
+
+# Create role-based security groups
+$ou = "OU=IAM-Lab,DC=corp,DC=local"
+
+New-ADGroup -Name "ROLE_Nurse"      -GroupScope Global -GroupCategory Security -Path $ou
+New-ADGroup -Name "ROLE_Physician"  -GroupScope Global -GroupCategory Security -Path $ou
+New-ADGroup -Name "ROLE_ITAdmin"    -GroupScope Global -GroupCategory Security -Path $ou
+New-ADGroup -Name "ROLE_Auditor"    -GroupScope Global -GroupCategory Security -Path $ou
+
+Write-Host "✅ Role groups created successfully" -ForegroundColor Green
+```
+
+![AD Groups Created](screenshots/03-ad-groups-created.png)
+
+> *Screenshot: ADUC or PowerShell showing the four role groups in the IAM-Lab OU*
+
+#### Step 2 — Create Test Users
+
+```powershell
+# Create test users and assign to roles
+$users = @(
+    @{ Name="Alice Johnson"; SamAccount="alice.johnson"; Role="ROLE_Nurse"     },
+    @{ Name="Bob Smith";     SamAccount="bob.smith";     Role="ROLE_Physician" },
+    @{ Name="Carol Davis";   SamAccount="carol.davis";   Role="ROLE_ITAdmin"   },
+    @{ Name="Dan Lee";       SamAccount="dan.lee";       Role="ROLE_Auditor"   }
+)
+
+$password = ConvertTo-SecureString "LabPass123!" -AsPlainText -Force
+
+foreach ($u in $users) {
+    New-ADUser -Name $u.Name `
+               -SamAccountName $u.SamAccount `
+               -UserPrincipalName "$($u.SamAccount)@corp.local" `
+               -Path $ou `
+               -AccountPassword $password `
+               -Enabled $true
+
+    Add-ADGroupMember -Identity $u.Role -Members $u.SamAccount
+    Write-Host "✅ Created $($u.Name) → $($u.Role)" -ForegroundColor Cyan
+}
+```
+
+![Users Created and Assigned](screenshots/04-ad-users-assigned.png)
+
+> *Screenshot: PowerShell output showing each user created and added to their role group*
+
+#### Step 3 — Verify Role Memberships
+
+```powershell
+# Check who is in each role
+$roles = @("ROLE_Nurse","ROLE_Physician","ROLE_ITAdmin","ROLE_Auditor")
+
+foreach ($role in $roles) {
+    $members = Get-ADGroupMember -Identity $role | Select-Object -ExpandProperty Name
+    Write-Host "`n[$role]" -ForegroundColor Yellow
+    $members | ForEach-Object { Write-Host "  - $_" }
+}
+```
+
+**Expected Output:**
+
+```
+[ROLE_Nurse]
+  - Alice Johnson
+
+[ROLE_Physician]
+  - Bob Smith
+
+[ROLE_ITAdmin]
+  - Carol Davis
+
+[ROLE_Auditor]
+  - Dan Lee
+```
+
+![Role Membership Verification](screenshots/05-ad-role-membership.png)
+
+> *Screenshot: Terminal output showing group memberships*
+
+#### Step 4 — Apply NTFS Permissions to Simulate Resource Access
+
+```powershell
+# Create simulated resource folders
+$base = "C:\LabResources"
+New-Item -ItemType Directory -Path "$base\PatientRecords" -Force
+New-Item -ItemType Directory -Path "$base\PhysicianOrders" -Force
+New-Item -ItemType Directory -Path "$base\AuditLogs" -Force
+
+# Grant ROLE_Nurse read access to PatientRecords
+$acl = Get-Acl "$base\PatientRecords"
+$rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+    "corp\ROLE_Nurse", "Read", "ContainerInherit,ObjectInherit", "None", "Allow"
+)
+$acl.AddAccessRule($rule)
+Set-Acl "$base\PatientRecords" $acl
+
+Write-Host "✅ NTFS permissions applied" -ForegroundColor Green
+```
+
+-----
+
+### 1.2 RBAC in Azure Entra ID
+
+#### Step 1 — Navigate to Entra ID
+
+1. Go to [portal.azure.com](https://portal.azure.com)
+1. Search for **Microsoft Entra ID** in the top search bar
+1. Select **Groups → New Group**
+
+![Entra ID Navigation](screenshots/06-entra-navigation.png)
+
+> *Screenshot: Azure portal with Entra ID selected in left nav*
+
+#### Step 2 — Create Role Groups in Entra ID
+
+In the Azure Portal:
+
+```
+Microsoft Entra ID → Groups → + New Group
+
+Group type:        Security
+Group name:        ROLE_Nurse
+Membership type:   Assigned
+```
+
+Repeat for: `ROLE_Physician`, `ROLE_ITAdmin`, `ROLE_Auditor`
+
+Or via **Azure CLI**:
+
+```bash
+# Login first
+az login
+
+# Create role groups
+roles=("ROLE_Nurse" "ROLE_Physician" "ROLE_ITAdmin" "ROLE_Auditor")
+
+for role in "${roles[@]}"; do
+    az ad group create \
+        --display-name "$role" \
+        --mail-nickname "$role" \
+        --description "IAM Lab: $role role group"
+    echo "✅ Created group: $role"
+done
+```
+
+![Entra Groups Created](screenshots/07-entra-groups.png)
+
+> *Screenshot: Microsoft Entra ID Groups blade showing the four role groups*
+
+#### Step 3 — Assign Azure RBAC Built-in Roles to a Resource
+
+```bash
+# Get your subscription ID
+SUB_ID=$(az account show --query id -o tsv)
+
+# Get the Object ID of the ROLE_Auditor group
+GROUP_OID=$(az ad group show --group "ROLE_Auditor" --query id -o tsv)
+
+# Assign Reader role at subscription scope
+az role assignment create \
+    --assignee "$GROUP_OID" \
+    --role "Reader" \
+    --scope "/subscriptions/$SUB_ID"
+
+echo "✅ Reader role assigned to ROLE_Auditor group"
+```
+
+#### Step 4 — Verify Role Assignment
+
+```bash
+az role assignment list \
+    --assignee "$GROUP_OID" \
+    --output table
+```
+
+**Expected Output:**
+
+```
+Principal           Role      Scope
+------------------  --------  ----------------------------
+ROLE_Auditor        Reader    /subscriptions/xxxx-xxxx-...
+```
+
+![Azure Role Assignment](screenshots/08-azure-role-assignment.png)
+
+> *Screenshot: Azure CLI output or Portal IAM blade showing role assignment*
+
+-----
+
+### 1.3 RBAC with Python Simulation
+
+Save this as `rbac_sim.py`:
+
+```python
+#!/usr/bin/env python3
+"""
+RBAC Simulation — Healthcare Example
+"""
+
+# --- Define permissions ---
+PERMISSIONS = {
+    "read_patient_records",
+    "update_patient_records",
+    "prescribe_medication",
+    "view_audit_logs",
+    "manage_users",
+    "view_billing"
+}
+
+# --- Define roles and their permissions ---
+ROLES = {
+    "Nurse": {
+        "read_patient_records",
+        "view_billing"
+    },
+    "Physician": {
+        "read_patient_records",
+        "update_patient_records",
+        "prescribe_medication",
+        "view_billing"
+    },
+    "ITAdmin": {
+        "manage_users",
+        "view_audit_logs"
+    },
+    "Auditor": {
+        "view_audit_logs",
+        "view_billing"
+    }
+}
+
+# --- Assign users to roles ---
+USERS = {
+    "alice.johnson": {"role": "Nurse"},
+    "bob.smith":     {"role": "Physician"},
+    "carol.davis":   {"role": "ITAdmin"},
+    "dan.lee":       {"role": "Auditor"}
+}
+
+
+def check_access(username: str, permission: str) -> bool:
+    """Evaluate whether a user has a given permission via their role."""
+    user = USERS.get(username)
+    if not user:
+        print(f"  ❌ DENIED  — User '{username}' not found")
+        return False
+
+    role = user["role"]
+    allowed = ROLES.get(role, set())
+
+    if permission in allowed:
+        print(f"  ✅ GRANTED — {username} ({role}) → {permission}")
+        return True
+    else:
+        print(f"  ❌ DENIED  — {username} ({role}) does not have '{permission}'")
+        return False
+
+
+def print_role_matrix():
+    """Print a permission matrix for all roles."""
+    from tabulate import tabulate
+
+    perms = sorted(PERMISSIONS)
+    headers = ["Permission"] + list(ROLES.keys())
+    rows = []
+
+    for perm in perms:
+        row = [perm]
+        for role, role_perms in ROLES.items():
+            row.append("✅" if perm in role_perms else "❌")
+        rows.append(row)
+
+    print("\n📊 RBAC Permission Matrix")
+    print(tabulate(rows, headers=headers, tablefmt="grid"))
+
+
+if __name__ == "__main__":
+    print("=" * 60)
+    print("           RBAC ACCESS CONTROL SIMULATION")
+    print("=" * 60)
+
+    print_role_matrix()
+
+    print("\n🔐 Access Control Checks:")
+    print("-" * 60)
+
+    # Test cases
+    tests = [
+        ("alice.johnson", "read_patient_records"),     # Should PASS
+        ("alice.johnson", "prescribe_medication"),     # Should FAIL
+        ("bob.smith",     "prescribe_medication"),     # Should PASS
+        ("bob.smith",     "manage_users"),             # Should FAIL
+        ("carol.davis",   "manage_users"),             # Should PASS
+        ("carol.davis",   "read_patient_records"),     # Should FAIL
+        ("dan.lee",       "view_audit_logs"),          # Should PASS
+        ("dan.lee",       "update_patient_records"),   # Should FAIL
+        ("unknown.user",  "read_patient_records"),     # Should FAIL
+    ]
+
+    for user, perm in tests:
+        check_access(user, perm)
+```
+
+**Run it:**
+
+```bash
+python3 rbac_sim.py
+```
+
+**Expected Output:**
+
+```
+============================================================
+           RBAC ACCESS CONTROL SIMULATION
+============================================================
+
+📊 RBAC Permission Matrix
++---------------------------+---------+-----------+---------+---------+
+| Permission                | Nurse   | Physician | ITAdmin | Auditor |
++===========================+=========+===========+=========+=========+
+| manage_users              | ❌      | ❌        | ✅      | ❌      |
++---------------------------+---------+-----------+---------+---------+
+| prescribe_medication      | ❌      | ✅        | ❌      | ❌      |
++---------------------------+---------+-----------+---------+---------+
+| read_patient_records      | ✅      | ✅        | ❌      | ❌      |
++---------------------------+---------+-----------+---------+---------+
+| update_patient_records    | ❌      | ✅        | ❌      | ❌      |
++---------------------------+---------+-----------+---------+---------+
+| view_audit_logs           | ❌      | ❌        | ✅      | ✅      |
++---------------------------+---------+-----------+---------+---------+
+| view_billing              | ✅      | ✅        | ❌      | ✅      |
++---------------------------+---------+-----------+---------+---------+
+
+🔐 Access Control Checks:
+------------------------------------------------------------
+  ✅ GRANTED — alice.johnson (Nurse) → read_patient_records
+  ❌ DENIED  — alice.johnson (Nurse) does not have 'prescribe_medication'
+  ✅ GRANTED — bob.smith (Physician) → prescribe_medication
+  ❌ DENIED  — bob.smith (Physician) does not have 'manage_users'
+  ✅ GRANTED — carol.davis (ITAdmin) → manage_users
+  ❌ DENIED  — carol.davis (ITAdmin) does not have 'read_patient_records'
+  ✅ GRANTED — dan.lee (Auditor) → view_audit_logs
+  ❌ DENIED  — dan.lee (Auditor) does not have 'update_patient_records'
+  ❌ DENIED  — User 'unknown.user' not found
+```
+
+![RBAC Python Sim Output](screenshots/09-rbac-python-output.png)
+
+> *Screenshot: Terminal running rbac_sim.py showing the matrix and access decisions*
+
+-----
+
+## Part 2 — ABAC Lab
+
+### Core ABAC Model
+
+Unlike RBAC, ABAC evaluates **attributes** at decision time. Access decisions consider:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      ABAC MODEL                             │
+│                                                             │
+│  Subject Attributes    Resource Attributes   Environment    │
+│  ┌─────────────────┐  ┌──────────────────┐  ┌──────────┐  │
+│  │ username: alice │  │ type: EHR        │  │ time:    │  │
+│  │ role: Nurse     │  │ sensitivity: HIGH│  │ 08:00    │  │
+│  │ dept: Oncology  │  │ dept: Oncology   │  │ IP:      │  │
+│  │ clearance: L2   │  │ owner: bob.smith │  │ 10.0.1.5 │  │
+│  └────────┬────────┘  └────────┬─────────┘  └────┬─────┘  │
+│           │                    │                  │         │
+│           └──────────┬─────────┘                  │         │
+│                      │         ┌───────────────────┘         │
+│                      ▼         ▼                             │
+│               ┌─────────────────────┐                       │
+│               │   Policy Engine     │                       │
+│               │  (PDP - Policy      │                       │
+│               │   Decision Point)   │                       │
+│               └──────────┬──────────┘                       │
+│                          │                                  │
+│               ┌──────────▼──────────┐                       │
+│               │  PERMIT / DENY      │                       │
+│               └─────────────────────┘                       │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### ABAC Architecture Components
+
+|Component                  |Acronym|Role                                            |
+|---------------------------|-------|------------------------------------------------|
+|Policy Enforcement Point   |**PEP**|Intercepts the request and enforces the decision|
+|Policy Decision Point      |**PDP**|Evaluates the policy and returns Permit/Deny    |
+|Policy Information Point   |**PIP**|Retrieves attribute values                      |
+|Policy Administration Point|**PAP**|Where policies are authored and stored          |
+
+-----
+
+### 2.1 ABAC Concepts and Policy Design
+
+A policy in ABAC is a logical expression:
+
+```
+POLICY: "Allow access to patient records IF..."
+  subject.role        == "Nurse"           AND
+  subject.department  == resource.department  AND
+  resource.type       == "PatientRecord"   AND
+  environment.time    >= 06:00             AND
+  environment.time    <= 22:00
+```
+
+This is far more **granular** than RBAC — the same user (Nurse) might be denied access to a patient in a **different department**, even with the same role.
+
+-----
+
+### 2.2 ABAC with Python Simulation
+
+Save this as `abac_sim.py`:
+
+```python
+#!/usr/bin/env python3
+"""
+ABAC Simulation — Healthcare Example
+Evaluates access based on subject, resource, and environment attributes.
+"""
+
+from datetime import datetime
+
+
+# ---------------------------------------------------------------------------
+# Attribute Stores
+# ---------------------------------------------------------------------------
+
+SUBJECTS = {
+    "alice.johnson": {
+        "role":        "Nurse",
+        "department":  "Oncology",
+        "clearance":   2,
+        "employment":  "full-time"
+    },
+    "bob.smith": {
+        "role":        "Physician",
+        "department":  "Oncology",
+        "clearance":   3,
+        "employment":  "full-time"
+    },
+    "carol.davis": {
+        "role":        "ITAdmin",
+        "department":  "IT",
+        "clearance":   2,
+        "employment":  "full-time"
+    },
+    "extern.vendor": {
+        "role":        "Vendor",
+        "department":  "External",
+        "clearance":   1,
+        "employment":  "contractor"
+    }
+}
+
+RESOURCES = {
+    "record:PT001": {
+        "type":        "PatientRecord",
+        "department":  "Oncology",
+        "sensitivity": "HIGH"
+    },
+    "record:PT002": {
+        "type":        "PatientRecord",
+        "department":  "Cardiology",
+        "sensitivity": "HIGH"
+    },
+    "report:AUD01": {
+        "type":        "AuditReport",
+        "department":  "Compliance",
+        "sensitivity": "MEDIUM"
+    },
+    "system:HVAC": {
+        "type":        "FacilitySystem",
+        "department":  "Facilities",
+        "sensitivity": "LOW"
+    }
+}
+
+
+# ---------------------------------------------------------------------------
+# Policy Engine
+# ---------------------------------------------------------------------------
+
+def get_environment() -> dict:
+    """Simulate environment attributes."""
+    now = datetime.now()
+    return {
+        "hour":       now.hour,
+        "ip_internal": True,   # Simulate internal network
+        "day_of_week": now.weekday()  # 0=Mon, 6=Sun
+    }
+
+
+def evaluate_policy(subject: dict, resource: dict, action: str, env: dict) -> tuple[bool, str]:
+    """
+    Policy Decision Point (PDP).
+    Returns (permit: bool, reason: str)
+    """
+
+    # --- Policy 1: Patient Records ---
+    # Nurses can read patient records in their own department during business hours
+    if resource["type"] == "PatientRecord" and action == "read":
+        if subject["role"] not in ("Nurse", "Physician"):
+            return False, "Role not authorized for patient records"
+        if subject["department"] != resource["department"]:
+            return False, f"Department mismatch: {subject['department']} ≠ {resource['department']}"
+        if not (6 <= env["hour"] <= 22):
+            return False, "Access outside allowed hours (06:00–22:00)"
+        if not env["ip_internal"]:
+            return False, "Must be on internal network"
+        return True, "All conditions met"
+
+    # --- Policy 2: Patient Records — Write ---
+    if resource["type"] == "PatientRecord" and action == "write":
+        if subject["role"] != "Physician":
+            return False, "Only Physicians can write patient records"
+        if subject["clearance"] < 3:
+            return False, f"Insufficient clearance level: {subject['clearance']} < 3"
+        if subject["department"] != resource["department"]:
+            return False, f"Department mismatch"
+        return True, "Physician with sufficient clearance in correct department"
+
+    # --- Policy 3: Audit Reports ---
+    if resource["type"] == "AuditReport" and action == "read":
+        if subject["role"] not in ("ITAdmin", "Auditor"):
+            return False, "Only ITAdmin or Auditor roles can read audit reports"
+        if subject["clearance"] < 2:
+            return False, "Insufficient clearance for audit reports"
+        return True, "Authorized role with sufficient clearance"
+
+    # --- Policy 4: Deny contractors access to sensitive resources ---
+    if subject["employment"] == "contractor" and resource["sensitivity"] in ("HIGH", "MEDIUM"):
+        return False, "Contractors not permitted on sensitive resources"
+
+    return False, "No matching policy — default DENY"
+
+
+def check_access(username: str, resource_id: str, action: str) -> bool:
+    """Full ABAC access check: gather attributes → evaluate policy → enforce."""
+    subject = SUBJECTS.get(username)
+    resource = RESOURCES.get(resource_id)
+    env = get_environment()
+
+    print(f"\n  Request: {username} → [{action}] {resource_id}")
+
+    if not subject:
+        print(f"  ❌ DENIED — Unknown subject '{username}'")
+        return False
+    if not resource:
+        print(f"  ❌ DENIED — Unknown resource '{resource_id}'")
+        return False
+
+    permit, reason = evaluate_policy(subject, resource, action, env)
+
+    if permit:
+        print(f"  ✅ PERMIT — {reason}")
+    else:
+        print(f"  ❌ DENY   — {reason}")
+
+    return permit
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    print("=" * 65)
+    print("           ABAC ACCESS CONTROL SIMULATION")
+    print("=" * 65)
+
+    print(f"\n🕐 Environment: Hour={datetime.now().hour}, Internal Network=True")
+    print("\n🔐 Policy Evaluations:")
+    print("-" * 65)
+
+    scenarios = [
+        # (user,            resource,        action,  description)
+        ("alice.johnson",  "record:PT001",  "read",  "Nurse reads own-dept patient record"),
+        ("alice.johnson",  "record:PT002",  "read",  "Nurse reads OTHER-dept patient record"),
+        ("alice.johnson",  "record:PT001",  "write", "Nurse tries to WRITE patient record"),
+        ("bob.smith",      "record:PT001",  "read",  "Physician reads own-dept record"),
+        ("bob.smith",      "record:PT001",  "write", "Physician writes own-dept record"),
+        ("bob.smith",      "record:PT002",  "write", "Physician writes OTHER-dept record"),
+        ("carol.davis",    "report:AUD01",  "read",  "ITAdmin reads audit report"),
+        ("carol.davis",    "record:PT001",  "read",  "ITAdmin reads patient record"),
+        ("extern.vendor",  "system:HVAC",   "read",  "Contractor reads LOW sensitivity system"),
+        ("extern.vendor",  "record:PT001",  "read",  "Contractor reads HIGH sensitivity record"),
+    ]
+
+    for user, resource, action, desc in scenarios:
+        print(f"\n  📌 {desc}")
+        check_access(user, resource, action)
+```
+
+**Run it:**
+
+```bash
+python3 abac_sim.py
+```
+
+**Expected Output:**
+
+```
+=================================================================
+           ABAC ACCESS CONTROL SIMULATION
+=================================================================
+
+🕐 Environment: Hour=14, Internal Network=True
+
+🔐 Policy Evaluations:
+-----------------------------------------------------------------
+
+  📌 Nurse reads own-dept patient record
+  Request: alice.johnson → [read] record:PT001
+  ✅ PERMIT — All conditions met
+
+  📌 Nurse reads OTHER-dept patient record
+  Request: alice.johnson → [read] record:PT002
+  ❌ DENY   — Department mismatch: Oncology ≠ Cardiology
+
+  📌 Nurse tries to WRITE patient record
+  Request: alice.johnson → [write] record:PT001
+  ❌ DENY   — Only Physicians can write patient records
+
+  📌 Physician reads own-dept record
+  Request: bob.smith → [read] record:PT001
+  ✅ PERMIT — All conditions met
+
+  📌 Physician writes own-dept record
+  Request: bob.smith → [write] record:PT001
+  ✅ PERMIT — Physician with sufficient clearance in correct department
+
+  📌 Physician writes OTHER-dept record
+  Request: bob.smith → [write] record:PT002
+  ❌ DENY   — Department mismatch
+
+  📌 ITAdmin reads audit report
+  Request: carol.davis → [read] report:AUD01
+  ✅ PERMIT — Authorized role with sufficient clearance
+
+  📌 ITAdmin reads patient record
+  Request: carol.davis → [read] record:PT001
+  ❌ DENY   — Role not authorized for patient records
+
+  📌 Contractor reads LOW sensitivity system
+  Request: extern.vendor → [read] system:HVAC
+  ❌ DENY   — No matching policy — default DENY
+
+  📌 Contractor reads HIGH sensitivity record
+  Request: extern.vendor → [read] record:PT001
+  ❌ DENY   — Contractors not permitted on sensitive resources
+```
+
+![ABAC Python Output](screenshots/10-abac-python-output.png)
+
+> *Screenshot: Terminal running abac_sim.py showing policy evaluation results*
+
+-----
+
+### 2.3 ABAC with AWS IAM (Optional)
+
+AWS IAM natively supports ABAC via **tags**. This is one of the most common real-world ABAC implementations.
+
+#### Step 1 — Create Users with Tags
+
+```bash
+# Create IAM users with department tags (simulating ABAC attributes)
+aws iam create-user --user-name alice-nurse \
+    --tags Key=Department,Value=Oncology Key=Role,Value=Nurse
+
+aws iam create-user --user-name bob-physician \
+    --tags Key=Department,Value=Oncology Key=Role,Value=Physician
+
+echo "✅ IAM users created with attribute tags"
+```
+
+#### Step 2 — Create an ABAC Policy Using Condition Keys
+
+Save as `abac-s3-policy.json`:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowAccessIfTagsMatch",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": "arn:aws:s3:::patient-records-*/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:PrincipalTag/Department": "${s3:prefix}",
+          "aws:PrincipalTag/Role": "Physician"
+        }
+      }
+    }
+  ]
+}
+```
+
+> **What this does:** A user can only access S3 objects in a prefix that matches their `Department` tag, and only if their `Role` tag is `Physician`. This is pure ABAC — no role assignments in IAM, just tags.
+
+#### Step 3 — Tag the S3 Buckets/Objects
+
+```bash
+# Create buckets per department
+aws s3 mb s3://patient-records-oncology
+aws s3 mb s3://patient-records-cardiology
+
+# Tag the buckets
+aws s3api put-bucket-tagging \
+    --bucket patient-records-oncology \
+    --tagging 'TagSet=[{Key=Department,Value=Oncology}]'
+```
+
+![AWS IAM ABAC Tags](screenshots/11-aws-abac-tags.png)
+
+> *Screenshot: AWS Console showing IAM user with Department and Role tags applied*
+
+-----
+
+## Part 3 — RBAC vs ABAC Comparison
+
+### Decision Flowchart
+
+```
+                        ACCESS REQUEST
+                             │
+                             ▼
+              ┌──────────────────────────┐
+              │  What model are we using?│
+              └──────────┬───────────────┘
+                         │
+           ┌─────────────┴─────────────┐
+           ▼                           ▼
+        RBAC                         ABAC
+           │                           │
+           ▼                           ▼
+   "What role does             "What are the attributes
+    this user have?"            of user, resource, env?"
+           │                           │
+           ▼                           ▼
+   Lookup role →               Evaluate policy rules
+   check permissions            against all attributes
+           │                           │
+           ▼                           ▼
+     GRANT / DENY               PERMIT / DENY
+```
+
+### Feature Comparison
+
+|Feature                      |RBAC                           |ABAC                                     |
+|-----------------------------|-------------------------------|-----------------------------------------|
+|**Access basis**             |User’s role                    |Attributes of user, resource, environment|
+|**Granularity**              |Coarse (role-level)            |Fine-grained (per attribute combination) |
+|**Policy language**          |Role → Permission mappings     |Boolean expressions over attributes      |
+|**Scalability**              |Role explosion risk at scale   |Scales cleanly via attributes            |
+|**Implementation complexity**|Low                            |Medium to High                           |
+|**Admin overhead**           |Low initially, grows with roles|Higher upfront, lower at scale           |
+|**Dynamic context**          |❌ Not native                   |✅ Yes (time, location, device)           |
+|**Regulatory alignment**     |HIPAA (basic), SOX             |HIPAA, HITRUST, Zero Trust               |
+|**Common in**                |AD, Azure, most IAM tools      |AWS IAM, SailPoint, Saviynt, OPA         |
+|**Best for**                 |Small/mid orgs, stable roles   |Large orgs, dynamic access needs         |
+
+### When to Use Which
+
+```
+Use RBAC when:
+  ✅ Your org has well-defined, stable job roles
+  ✅ Access needs are consistent per role
+  ✅ Team is less mature with IAM tooling
+  ✅ You need fast, simple implementation
+  ✅ Using AD groups as your primary control
+
+Use ABAC when:
+  ✅ You need fine-grained, contextual access
+  ✅ Same role should see different data by department
+  ✅ Time-based or location-based policies are required
+  ✅ You're implementing Zero Trust architecture
+  ✅ Contractor/vendor access must be tightly scoped
+  ✅ You have SailPoint, Saviynt, or OPA in your stack
+```
+
+-----
+
+## Lab Challenges
+
+Test your understanding with these exercises:
+
+### Challenge 1 — Role Explosion (RBAC)
+
+**Problem:** Your org has 5 departments × 4 roles = 20 groups. A new requirement says nurses in oncology need extra permissions that ER nurses don’t.
+
+> How many new groups does this create? What’s the alternative?
+
+### Challenge 2 — Extend the ABAC Simulation
+
+Modify `abac_sim.py` to add a new policy:
+
+```
+Policy: "After-hours (22:00–06:00) access to patient records
+         requires clearance level ≥ 3 AND on-call flag = True"
+```
+
+Add an `on_call` attribute to `SUBJECTS` and enforce it in the `evaluate_policy()` function.
+
+### Challenge 3 — Hybrid Model
+
+Design a hybrid RBAC+ABAC model where:
+
+- Roles are still used for **coarse-grained** access (who can see what type of resource)
+- ABAC conditions are layered on top for **fine-grained** filtering (which specific records)
+
+Draw the policy decision flow and implement it as a third Python script `hybrid_sim.py`.
+
+-----
+
+## Key Takeaways
+
+1. **RBAC** is simpler to implement but suffers from **role explosion** and lacks contextual awareness.
+1. **ABAC** is more powerful and supports **Zero Trust** principles — evaluate every attribute, not just the role.
+1. Most enterprise IAM tools (SailPoint, Saviynt, Azure PIM) support **hybrid models** — RBAC for role assignment + ABAC conditions at access decision time.
+1. In healthcare, ABAC is increasingly required for **HIPAA minimum necessary** compliance — giving nurses access to all records when they should only see records in their unit is a HIPAA risk.
+1. The **PDP/PEP/PIP/PAP** architecture in ABAC maps directly to how tools like **OPA (Open Policy Agent)** and **SailPoint AI** make access decisions.
+
+-----
+
+## References
+
+- [NIST SP 800-162 — Guide to ABAC](https://csrc.nist.gov/publications/detail/sp/800-162/final)
+- [NIST SP 800-207 — Zero Trust Architecture](https://csrc.nist.gov/publications/detail/sp/800-207/final)
+- [Azure RBAC Documentation](https://learn.microsoft.com/en-us/azure/role-based-access-control/overview)
+- [AWS IAM ABAC Guide](https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction_attribute-based-access-control.html)
+- [Open Policy Agent (OPA)](https://www.openpolicyagent.org/)
+- [SailPoint Identity Governance](https://www.sailpoint.com/)
+
+-----
+
+## 📸 Screenshots Directory
+
+Place your screenshots in the `screenshots/` folder. Expected files:
+
+|File                          |What to Capture                                |
+|------------------------------|-----------------------------------------------|
+|`01-azure-cloudshell.png`     |Azure Cloud Shell opened                       |
+|`02-rsat-check.png`           |PowerShell RSAT verification output            |
+|`03-ad-groups-created.png`    |ADUC or PS output showing role groups          |
+|`04-ad-users-assigned.png`    |PS output showing users created and assigned   |
+|`05-ad-role-membership.png`   |PS output of Get-ADGroupMember                 |
+|`06-entra-navigation.png`     |Azure portal Entra ID blade                    |
+|`07-entra-groups.png`         |Entra ID Groups blade with role groups         |
+|`08-azure-role-assignment.png`|Azure CLI or portal IAM showing role assignment|
+|`09-rbac-python-output.png`   |Terminal output of rbac_sim.py                 |
+|`10-abac-python-output.png`   |Terminal output of abac_sim.py                 |
+|`11-aws-abac-tags.png`        |AWS Console showing IAM user tags              |
+
+```
+rbac-abac-lab/
+├── README.md
+├── requirements.txt
+├── rbac_sim.py
+├── abac_sim.py
+├── abac-s3-policy.json
+└── screenshots/
+    ├── 01-azure-cloudshell.png
+    ├── 02-rsat-check.png
+    └── ... (add as you complete the lab)
+```
+
+-----
+
+*Lab complete. Proceed to [Lab Challenges](#lab-challenges) or explore the [SailPoint RBAC/ABAC integration guide](https://documentation.sailpoint.com/) for enterprise implementation patterns.*
